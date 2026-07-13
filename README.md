@@ -15,33 +15,55 @@ through `vmlaunch`/`vmresume`. Those instructions **`#UD` (fault) on AMD.**
 it requires emulating the entire VMX/VMCS model on top of SVM/VMCB. That
 translation layer does not exist in the wild and is a research-scale effort.
 
-This plugin is honest about that boundary:
+This plugin is honest about that boundary. Progress is now split across the
+translation core (built) and the interception plumbing (still required):
 
 | Piece | Status |
 |-------|--------|
 | Lilu integration, cross-compile, load path | ✅ done, builds clean |
 | SVM detection + `EFER.SVME` + host save area + VMCB (`kern_svm.*`) | ✅ real |
 | Hooking the kernel VMX gate so `kern.hv_support` reports available | ✅ implemented (necessary, **not** sufficient) |
-| **VMX→SVM guest-run translation** (`vmxToSvmVcpuRun`) | ❌ **stubbed** — compiled out, specified in comments |
+| Shadow VMCS + **VMCS↔VMCB field translation** (`kern_vmcs_vmcb.*`) | ✅ implemented, **untested on HW** |
+| Segment AR↔attrib conversion, SVM-exit→VMX-reason map | ✅ implemented |
+| VMX instruction **semantics** (vmread/write/ptrld/launch…) (`kern_vmx_emu.*`) | ✅ implemented |
+| Guest world-switch asm (`svm_switch.S`) | ⚠️ written, **gated off** (`AMDV_ENABLE_GUEST_LAUNCH`), unvalidated |
+| `#UD` trap → `decodeVmx()` (instruction decode from trap frame) | ❌ **scaffolded** — returns false |
+| **EPT→NPT** page-table rebuild | ❌ **not done** (pointer wired with a TODO) |
+| VM-exit qualification / intr-info back-translation | ❌ partial |
 
-So after loading, `sysctl kern.hv_support` can be made to read `1`, but a real
-guest launched through `Hypervisor.framework` will still fault, because the
-VMCS↔VMCB translation in [`src/kern_hv_amd.cpp`](src/kern_hv_amd.cpp) (the
-`#if 0` block) is not implemented. It is left explicit rather than faked. This
-has **not** been tested on AMD hardware — treat it as a correct-by-construction
-scaffold, not a working hypervisor shim.
+What this means in practice: the pipeline that turns Apple's `vmwrite`s into a
+VMCB, runs it, and maps the exit back is **written and reviewable**, but two
+things stop a guest from actually running: (1) nothing yet routes the `#UD`
+that Apple's VMX instructions raise into `VmxEmulator::handleUD`, and the
+decode that would feed it is stubbed; (2) an EPT pointer is not a valid AMD
+nested-page-table root, so guest memory would not be mapped. Both are called
+out at their sites. **None of this is tested on AMD hardware.**
 
-If you only need the SVM hardware brought up (the part that genuinely works),
-that lives in `kern_svm.*` and runs independently of the gate hook.
+The SVM hardware bring-up (`kern_svm.*`) still works independently of all this.
+
+### Where the hard parts are (start here to continue)
+
+- `src/kern_vmcs_vmcb.cpp` — `translateVmcsToVmcb`: the `SEC_CTL_ENABLE_EPT`
+  branch needs an EPT→NPT walk; MSR/IO bitmaps need MSRPM/IOPM translation.
+- `src/kern_vmx_emu.cpp` — `decodeVmx` (use Lilu's bundled `hde64`), and the
+  RIP-advance / VMX-flag write-back in `handleUD`.
+- `src/kern_hv_amd.cpp` — install the per-CPU `#UD` (vector 6) IDT hook that
+  calls `handleUD`.
+- `src/svm_switch.S` — validate the world-switch on real hardware before
+  setting `AMDV_ENABLE_GUEST_LAUNCH=1`.
 
 ## Layout
 
 ```
 Info.plist            Lilu-plugin bundle (depends on as.vit9696.Lilu)
 Makefile              Cross-compiles x86_64 via MacKernelSDK (no KDK/Intel Mac)
-src/SVM.h             SVM MSRs, CPUID leaves, VMCB layout, instruction wrappers
+src/SVM.h             SVM MSRs, CPUID leaves, VMCB layout + state-save accessors
 src/kern_svm.*        SvmBackend: detect + enable SVM, allocate VMCB
-src/kern_hv_amd.*     VMX gate hook + the (stubbed) VMX→SVM shim spec
+src/kern_vmx.hpp      VMX field encodings, exit reasons, ShadowVMCS
+src/kern_vmcs_vmcb.*  VMCS↔VMCB translation + SVM/VMX exit mapping
+src/kern_vmx_emu.*    VMX instruction emulation + vmlaunch/vmresume run loop
+src/svm_switch.S      Guest world-switch (VMLOAD/VMRUN/VMSAVE), gated off
+src/kern_hv_amd.*     VMX gate hook; binds the emulator to the VMCB
 src/kern_start.cpp    PluginConfiguration + init entry point
 Lilu/                 submodule — plugin API + bootstrap (plugin_start.cpp)
 MacKernelSDK/         submodule — kernel headers + libkmod for cross-compile

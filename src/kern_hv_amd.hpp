@@ -25,6 +25,7 @@
 
 #include <Headers/kern_patcher.hpp>
 #include "kern_svm.hpp"
+#include "kern_vmx_emu.hpp"
 
 class HypervisorAMD {
 public:
@@ -38,7 +39,8 @@ private:
 	// routed, kept for symmetry / potential fallback).
 	static bool wrapVmxIsAvailable(void);
 
-	SvmBackend fSvm;
+	SvmBackend   fSvm;
+	VmxEmulator  fVmx;
 
 	static HypervisorAMD *callbackInst;
 	static mach_vm_address_t orgVmxIsAvailable;

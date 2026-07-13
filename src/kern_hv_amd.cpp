@@ -72,39 +72,20 @@ void HypervisorAMD::onPatcherLoad(KernelPatcher &patcher)
 			   "Symbol names must be updated for this kernel build.");
 	}
 
-	// 3. The real work would go here: route the VMX vcpu-run path to
-	//    vmxToSvmVcpuRun(). It is deliberately NOT installed - see below.
-	SYSLOG("amdv", "NOTE: VMX->SVM guest-run translation is not implemented; "
-		   "Hypervisor.framework guests will still fault on AMD. See kern_hv_amd.cpp.");
-}
+	// 3. Bind the VMX->SVM emulator to the prepared VMCB. The instruction
+	//    semantics (kern_vmx_emu.*) and the VMCS<->VMCB translation
+	//    (kern_vmcs_vmcb.*) are implemented; what remains before guests run is
+	//    (a) trapping #UD and routing it into fVmx.handleUD(), and
+	//    (b) filling decodeVmx() + the EPT->NPT rebuild.
+	fVmx.bind(fSvm.vmcb(), fSvm.vmcbPA(), fSvm.features());
+	SYSLOG("amdv", "VMX->SVM emulator bound to VMCB; #UD interception + EPT/NPT "
+		   "rebuild still required before Hypervisor.framework guests run. "
+		   "Set AMDV_ENABLE_GUEST_LAUNCH=1 only on validated AMD hardware.");
 
-#if 0
-// ===========================================================================
-// UNIMPLEMENTED CORE - kept as a specification, compiled out.
-//
-// To make Hypervisor.framework actually run on AMD you would route the
-// kernel's per-vCPU VMX run function to something like this and translate the
-// VMCS Apple populated (via its vmwrite calls) into a VMCB, run it, and map
-// the SVM #VMEXIT back onto the VMX exit reason Apple's code expects. Every
-// line below is a hard sub-project:
-//
-//   1. Intercept vmwrite/vmread (or shadow the VMCS region) so Apple's guest
-//      state lands somewhere we can read - the CPU won't maintain a VMCS.
-//   2. Map VMCS fields -> VMCB control/state-save fields (imperfect: e.g.
-//      VMX "VM-exit controls" have no 1:1 SVM analogue).
-//   3. Build nested page tables (NPT) mirroring Apple's EPT.
-//   4. amdv_vmload/vmrun/vmsave with per-CPU pinning.
-//   5. Translate SVM EXITCODE -> VMX basic exit reason + qualification.
-//
-// This is why no shipping product does this; it is left explicit rather than
-// faked.
-// ===========================================================================
-static uint64_t vmxToSvmVcpuRun(void * /*apple_vcpu*/)
-{
-	PANIC("amdv", "vmxToSvmVcpuRun is unimplemented");
-	return 0;
+	// TODO: install a #UD (vector 6) IDT hook that calls fVmx.handleUD(frame).
+	// The IDT-entry rewrite is per-CPU and platform-specific; it is the last
+	// piece of plumbing and is intentionally not performed automatically.
 }
-#endif
 
 void HypervisorAMD::init()
 {

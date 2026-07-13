@@ -31,6 +31,10 @@ public:
 	uint32_t numAsids()    const { return fNumAsids; }
 	uint32_t features()    const { return fSvmFeatures; }
 
+	// The prepared VMCB and its physical address (valid after enable()).
+	vmcb_t  *vmcb()        const { return fVmcb; }
+	uint64_t vmcbPA()      const { return fVmcbPA; }
+
 private:
 	void *allocContiguousPage(IOBufferMemoryDescriptor **outDesc, uint64_t *outPhys);
 

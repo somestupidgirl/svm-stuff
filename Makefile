@@ -49,10 +49,15 @@ BUILD := build
 SRCS := src/kern_start.cpp \
         src/kern_hv_amd.cpp \
         src/kern_svm.cpp \
+        src/kern_vmcs_vmcb.cpp \
+        src/kern_vmx_emu.cpp \
         $(LILU)/Library/plugin_start.cpp
 
+ASRCS := src/svm_switch.S
+
 # Flatten object paths into build/ so the submodule tree stays clean.
-OBJS := $(addprefix $(BUILD)/,$(notdir $(SRCS:.cpp=.o)))
+OBJS := $(addprefix $(BUILD)/,$(notdir $(SRCS:.cpp=.o))) \
+        $(addprefix $(BUILD)/,$(notdir $(ASRCS:.S=.o)))
 
 .PHONY: all sign clean check-submodules
 
@@ -71,6 +76,10 @@ $(BUILD)/%.o: src/%.cpp
 $(BUILD)/plugin_start.o: $(LILU)/Library/plugin_start.cpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: src/%.S
+	@mkdir -p $(BUILD)
+	$(CXX) -target $(TARGET) -c $< -o $@
 
 $(PRODUCT): $(OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $(OBJS)

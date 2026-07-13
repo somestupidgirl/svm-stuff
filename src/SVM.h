@@ -69,9 +69,16 @@
 #define INTERCEPT2_VMMCALL        (1u << 1)    /* offset 0x010, bit 1    */
 
 /* Well-known VMEXIT codes (Vol.2 Appendix C "SVM Intercept Codes"). */
+#define VMEXIT_EXCP_BASE          0x040ull   /* 0x40+vector for #exceptions */
+#define VMEXIT_EXCP_LAST          0x05Full
+#define VMEXIT_INTR               0x060ull   /* physical INTR               */
+#define VMEXIT_NMI                0x061ull
 #define VMEXIT_CPUID              0x072ull
 #define VMEXIT_HLT                0x078ull
+#define VMEXIT_IOIO               0x07Bull
+#define VMEXIT_MSR                0x07Cull   /* EXITINFO1 bit0: 1=wrmsr     */
 #define VMEXIT_VMMCALL            0x081ull
+#define VMEXIT_NPF                0x400ull   /* nested page fault           */
 #define VMEXIT_INVALID            (-1ll)
 
 /*
@@ -148,5 +155,80 @@ static inline void amdv_vmsave(uint64_t vmcb_pa)
 
 static inline void amdv_stgi(void) { __asm__ volatile ("stgi" ::: "memory"); }
 static inline void amdv_clgi(void) { __asm__ volatile ("clgi" ::: "memory"); }
+
+/* ------------------------------------------------------------------ */
+/* VMCB state-save area (Vol.2 Appendix B, offsets from VMCB base).    */
+/*                                                                    */
+/* The save area begins at 0x400. Rather than model the whole page as */
+/* a fragile packed struct, named absolute offsets plus small typed   */
+/* accessors are used; each offset is verifiable against the manual.  */
+/* ------------------------------------------------------------------ */
+
+/* Each segment slot is {selector:u16, attrib:u16, limit:u32, base:u64}. */
+#define VMCB_SEG_ES    0x400u
+#define VMCB_SEG_CS    0x410u
+#define VMCB_SEG_SS    0x420u
+#define VMCB_SEG_DS    0x430u
+#define VMCB_SEG_FS    0x440u
+#define VMCB_SEG_GS    0x450u
+#define VMCB_SEG_GDTR  0x460u
+#define VMCB_SEG_LDTR  0x470u
+#define VMCB_SEG_IDTR  0x480u
+#define VMCB_SEG_TR    0x490u
+
+#define VMCB_CPL       0x4CBu   /* u8  */
+#define VMCB_EFER      0x4D0u   /* u64 (guest EFER; SVME must be set)   */
+#define VMCB_CR4       0x548u
+#define VMCB_CR3       0x550u
+#define VMCB_CR0       0x558u
+#define VMCB_DR7       0x560u
+#define VMCB_DR6       0x568u
+#define VMCB_RFLAGS    0x570u
+#define VMCB_RIP       0x578u
+#define VMCB_RSP       0x5D8u
+#define VMCB_RAX       0x5F8u
+#define VMCB_STAR      0x600u
+#define VMCB_LSTAR     0x608u
+#define VMCB_CSTAR     0x610u
+#define VMCB_SFMASK    0x618u
+#define VMCB_KGSBASE   0x620u
+#define VMCB_SYSENTCS  0x628u
+#define VMCB_SYSENTESP 0x630u
+#define VMCB_SYSENTEIP 0x638u
+#define VMCB_CR2       0x640u
+#define VMCB_GPAT      0x668u   /* nested-paging guest PAT              */
+
+/* Control-area fields past nested_cr3 that the shim reads. */
+#define VMCB_CTL_NRIP  0x0C8u   /* next-sequential RIP on #VMEXIT       */
+
+typedef struct __attribute__((packed)) {
+    uint16_t selector;
+    uint16_t attrib;   /* SVM 12-bit packed attributes (see below)     */
+    uint32_t limit;
+    uint64_t base;
+} vmcb_seg_t;
+
+_Static_assert(sizeof(vmcb_seg_t) == 16, "VMCB segment slot is 16 bytes");
+
+static inline uint64_t vmcb_get64(const vmcb_t *v, uint32_t off)
+{
+    return *(const volatile uint64_t *)((const uint8_t *)v + off);
+}
+static inline void vmcb_set64(vmcb_t *v, uint32_t off, uint64_t val)
+{
+    *(volatile uint64_t *)((uint8_t *)v + off) = val;
+}
+static inline uint8_t vmcb_get8(const vmcb_t *v, uint32_t off)
+{
+    return *((const uint8_t *)v + off);
+}
+static inline void vmcb_set8(vmcb_t *v, uint32_t off, uint8_t val)
+{
+    *((uint8_t *)v + off) = val;
+}
+static inline vmcb_seg_t *vmcb_seg(vmcb_t *v, uint32_t off)
+{
+    return (vmcb_seg_t *)((uint8_t *)v + off);
+}
 
 #endif /* AMDV_SVM_H */
