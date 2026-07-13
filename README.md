@@ -1,105 +1,98 @@
-# AMDV — AMD-V (SVM) enablement kext for macOS Big Sur
+# AMDV — an AMD-V (SVM) Lilu plugin for macOS Big Sur
 
-A macOS kernel extension that detects and enables **AMD-V / SVM** hardware
-virtualization on AMD ("Hackintosh") systems running macOS Big Sur (11.x).
+A [Lilu](https://github.com/acidanthera/Lilu) plugin that brings up AMD **SVM
+(AMD-V)** hardware and hooks the XNU kernel's VMX availability gate, as a
+foundation for making virtualization work on AMD ("Hackintosh") systems
+running macOS Big Sur (11.x). It cross-compiles for x86_64 from **any** host,
+including Apple Silicon, via the vendored **MacKernelSDK**.
 
-## What this is — and what it is not
+## Read this first — what actually works
 
-macOS never shipped on AMD hardware, so its in-kernel hypervisor (behind
-`Hypervisor.framework`) is **Intel VMX only** and closed-source. **No kext can
-retarget Apple's hypervisor to AMD-V.** So this project does what third-party
-hypervisor drivers (VirtualBox's `VBoxDrv`, VMware's `vmmon`) do instead: it
-programs the AMD **SVM** hardware directly.
+Apple's `Hypervisor.framework` is backed by **VMX (Intel VT-x)** code compiled
+into the closed XNU kernel: VMCS setup through `vmwrite`/`vmread`, guest entry
+through `vmlaunch`/`vmresume`. Those instructions **`#UD` (fault) on AMD.**
+"Making the framework SVM-compatible" is therefore **not a one-symbol hook** —
+it requires emulating the entire VMX/VMCS model on top of SVM/VMCB. That
+translation layer does not exist in the wild and is a research-scale effort.
 
-**Implemented and safe to run:**
+This plugin is honest about that boundary:
 
-- CPUID-based SVM capability detection (vendor, `0x80000001` ECX.SVM,
-  `0x8000000A` feature flags), plus firmware `VM_CR.SVMDIS` / SVM-lock checks.
-- Enabling `EFER.SVME` and installing a valid host state-save area
-  (`VM_HSAVE_PA`).
-- Allocating a page-aligned, physically-contiguous VMCB and setting a baseline
-  control area (intercepts + ASID).
+| Piece | Status |
+|-------|--------|
+| Lilu integration, cross-compile, load path | ✅ done, builds clean |
+| SVM detection + `EFER.SVME` + host save area + VMCB (`kern_svm.*`) | ✅ real |
+| Hooking the kernel VMX gate so `kern.hv_support` reports available | ✅ implemented (necessary, **not** sufficient) |
+| **VMX→SVM guest-run translation** (`vmxToSvmVcpuRun`) | ❌ **stubbed** — compiled out, specified in comments |
 
-**Deliberately *not* done (skeleton only):**
+So after loading, `sysctl kern.hv_support` can be made to read `1`, but a real
+guest launched through `Hypervisor.framework` will still fault, because the
+VMCS↔VMCB translation in [`src/kern_hv_amd.cpp`](src/kern_hv_amd.cpp) (the
+`#if 0` block) is not implemented. It is left explicit rather than faked. This
+has **not** been tested on AMD hardware — treat it as a correct-by-construction
+scaffold, not a working hypervisor shim.
 
-- The `VMRUN` guest-entry loop. It is compiled out behind
-  `AMDV_ENABLE_GUEST_LAUNCH` because launching a guest requires guest physical
-  memory (nested page tables), a fully populated VMCB state-save area, and
-  per-CPU thread pinning. Running `VMRUN` without those will fault. See
-  `amdv_run_guest()` in [`src/AMDV.cpp`](src/AMDV.cpp) for the exact TODO list.
-- Multi-CPU enablement. `SVME` is per-core; this driver enables it on the
-  current processor only. A production build must broadcast via a CPU
-  rendezvous. Each such site is flagged in the source.
-
-This has **not** been tested on real AMD hardware — treat it as a correct-by-
-construction foundation, not a shipping hypervisor.
+If you only need the SVM hardware brought up (the part that genuinely works),
+that lives in `kern_svm.*` and runs independently of the gate hook.
 
 ## Layout
 
 ```
-Info.plist          Bundle + IOKitPersonalities (matches on IOResources)
-Makefile            Hand-built kext against a Big Sur KDK
-src/SVM.h           SVM MSRs, CPUID leaves, VMCB layout, instruction wrappers
-src/AMDV.hpp/.cpp   IOService that detects + enables SVM on start()
+Info.plist            Lilu-plugin bundle (depends on as.vit9696.Lilu)
+Makefile              Cross-compiles x86_64 via MacKernelSDK (no KDK/Intel Mac)
+src/SVM.h             SVM MSRs, CPUID leaves, VMCB layout, instruction wrappers
+src/kern_svm.*        SvmBackend: detect + enable SVM, allocate VMCB
+src/kern_hv_amd.*     VMX gate hook + the (stubbed) VMX→SVM shim spec
+src/kern_start.cpp    PluginConfiguration + init entry point
+Lilu/                 submodule — plugin API + bootstrap (plugin_start.cpp)
+MacKernelSDK/         submodule — kernel headers + libkmod for cross-compile
 ```
-
-`src/SVM.h` is self-contained (only `stdint.h`) and its VMCB layout is checked
-at compile time by a `_Static_assert` against the 4-KiB page size.
 
 ## Building
 
-You need the **Kernel Debug Kit** matching your running build, from
-<https://developer.apple.com/download/all/> ("Kernel Debug Kit 11.x").
-
 ```sh
-make KDK=/Library/Developer/KDKs/KDK_11.7.10_20G1427.kdk
-make sign        # ad-hoc codesign for local development
+git submodule update --init --recursive
+make                 # -> AMDV.kext (x86_64), works on Apple Silicon too
+make sign            # ad-hoc codesign for local development
 ```
 
-The Makefile uses the standard hand-built-kext flag set (`-mkernel
--fapple-kext -fno-exceptions -fno-rtti`, linked with `-kext`). An Xcode
-"Generic Kernel Extension" target is an equally valid alternative.
+The Makefile compiles with `-target x86_64-apple-macos11`, `-nostdinc
+-isystem MacKernelSDK/Headers`, and links the relocatable kext against
+`MacKernelSDK/Library/x86_64/libkmod.a`. Lilu API symbols stay undefined at
+link time and are resolved on load via the `OSBundleLibraries` dependency on
+`as.vit9696.Lilu` — verified with `nm -u`.
 
-## Loading on Big Sur (important caveats)
+## Loading on Big Sur
 
-Big Sur tightened kext loading considerably:
+Requires **Lilu.kext** to be present and loaded, plus the usual Big Sur kext
+prerequisites:
 
-1. **SIP must permit unsigned/third-party kexts.** From recoveryOS,
-   `csrutil` must allow kext loading (and, on Apple-Silicon-era tooling,
-   `csrutil authenticated-root disable` if you modify the boot kext
-   collection). A properly notarized kext avoids most of this; an ad-hoc
-   signed dev build does not.
-2. **`kextload`/`kextutil` are deprecated.** Loading now goes through
-   `kmutil`:
-
-   ```sh
-   sudo cp -R AMDV.kext /Library/Extensions/
-   sudo chown -R root:wheel /Library/Extensions/AMDV.kext
-   sudo kmutil load -p /Library/Extensions/AMDV.kext      # dev load
-   # or rebuild the auxiliary/boot collection and reboot:
-   sudo kmutil install --update-all
-   ```
-3. Watch the log:
+1. SIP must permit third-party kexts (`csrutil`), and modifying the boot kext
+   collection needs `csrutil authenticated-root disable`.
+2. Use `kmutil` (not the deprecated `kextload`):
 
    ```sh
-   log stream --predicate 'senderImagePath CONTAINS "AMDV"' --style compact
-   # or after the fact:
-   log show --last 5m --predicate 'eventMessage CONTAINS "AMDV:"'
+   sudo cp -R Lilu.kext AMDV.kext /Library/Extensions/
+   sudo chown -R root:wheel /Library/Extensions/Lilu.kext /Library/Extensions/AMDV.kext
+   sudo kmutil load -p /Library/Extensions/Lilu.kext
+   sudo kmutil load -p /Library/Extensions/AMDV.kext
    ```
+   On a Hackintosh these normally go in the bootloader (OpenCore) kext list
+   instead, with Lilu ordered before AMDV.
+3. Boot args: `-amdvdbg` (verbose), `-amdvoff` (disable), `-amdvbeta` (allow on
+   untested kernels). Watch the log:
 
-   On success you'll see the detected SVM revision, ASID count, feature
-   flags, and the `VM_HSAVE_PA` / VMCB physical addresses.
-
-On non-AMD or firmware-locked machines the kext loads, logs why SVM is
-unavailable, and stays idle.
+   ```sh
+   log stream --predicate 'eventMessage CONTAINS "AMDV"' --style compact
+   ```
 
 ## Safety
 
-Enabling `EFER.SVME` and executing SVM instructions is privileged, kernel-mode
-CPU programming. A malformed VMCB or an errant `VMRUN` can panic or hang the
-machine. Test in a disposable Big Sur install, keep a recovery path, and leave
-`AMDV_ENABLE_GUEST_LAUNCH` at `0` until the guest-memory setup is real.
+Setting `EFER.SVME` and executing SVM instructions is privileged kernel CPU
+programming; a bad VMCB or an errant `VMRUN` can panic the machine. The
+guest-run path is intentionally left disabled. Test only in a disposable Big
+Sur install with a recovery path.
 
-## License / status
+## Status
 
-Educational reference implementation, version 0.1.0. No warranty.
+Educational reference / research scaffold, v0.1.0. No warranty. Lilu and
+MacKernelSDK are © Acidanthera under their own licenses (see submodules).

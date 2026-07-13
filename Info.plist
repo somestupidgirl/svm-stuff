@@ -22,6 +22,7 @@
     <string>????</string>
     <key>OSBundleRequired</key>
     <string>Root</string>
+    <!-- Lilu plugin: matched once against IOResources so start() runs early. -->
     <key>IOKitPersonalities</key>
     <dict>
         <key>AMDV</key>
@@ -30,24 +31,26 @@
             <string>org.hackintosh.AMDV</string>
             <key>IOClass</key>
             <string>AMDV</string>
-            <key>IOProviderClass</key>
-            <string>IOResources</string>
             <key>IOMatchCategory</key>
             <string>AMDV</string>
+            <key>IOProviderClass</key>
+            <string>IOResources</string>
             <key>IOResourceMatch</key>
             <string>IOKit</string>
         </dict>
     </dict>
     <key>OSBundleLibraries</key>
     <dict>
+        <key>as.vit9696.Lilu</key>
+        <string>1.2.0</string>
         <key>com.apple.kpi.iokit</key>
-        <string>8.0</string>
+        <string>12.0.0</string>
         <key>com.apple.kpi.libkern</key>
-        <string>8.0</string>
+        <string>12.0.0</string>
         <key>com.apple.kpi.mach</key>
-        <string>8.0</string>
+        <string>12.0.0</string>
         <key>com.apple.kpi.unsupported</key>
-        <string>8.0</string>
+        <string>12.0.0</string>
     </dict>
 </dict>
 </plist>

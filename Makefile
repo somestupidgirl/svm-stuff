@@ -1,70 +1,90 @@
-# Makefile - build AMDV.kext against a Big Sur Kernel Development Kit.
+# Makefile - build AMDV.kext as a Lilu plugin.
 #
-# Requirements:
-#   * Command Line Tools / Xcode (for clang, ld, codesign).
-#   * A Kernel Debug Kit matching your running build, from
-#     https://developer.apple.com/download/all/  ("Kernel Debug Kit 11.x").
-#     Point KDK at it, e.g.:
-#       make KDK=/Library/Developer/KDKs/KDK_11.7.10_20G1427.kdk
+# Cross-compiles for x86_64 from ANY host (including Apple Silicon) using the
+# MacKernelSDK submodule instead of an Intel Kernel Debug Kit - that is the
+# whole point of vendoring MacKernelSDK. No KDK, no Intel Mac required.
 #
-# Targets:
-#   make            - compile and assemble AMDV.kext
-#   make sign       - ad-hoc codesign the bundle (dev only; see README)
+#   git submodule update --init --recursive
+#   make            # -> AMDV.kext
+#   make sign       # ad-hoc codesign (dev only)
 #   make clean
+#
+# Requirements: Command Line Tools (clang/ld/codesign) and the two submodules
+# (Lilu, MacKernelSDK) checked out under this directory.
 
-BUNDLE      := AMDV.kext
-EXEC        := AMDV
-BUNDLE_ID   := org.hackintosh.AMDV
+PRODUCT      := AMDV
+BUNDLE       := $(PRODUCT).kext
+BUNDLE_ID    := org.hackintosh.AMDV
+MODULE_VER   := 0.1.0
 
-KDK         ?= $(lastword $(wildcard /Library/Developer/KDKs/*.kdk))
-SDK         := $(shell xcrun --sdk macosx --show-sdk-path)
-CXX         := $(shell xcrun -f clang++)
-CODESIGN    := $(shell xcrun -f codesign)
+# Target an x86_64 Big Sur kernel regardless of build host arch.
+TARGET       := x86_64-apple-macos11
 
-KHDRS       := $(KDK)/System/Library/Frameworks/Kernel.framework/Headers
-KPRIV       := $(KDK)/System/Library/Frameworks/Kernel.framework/PrivateHeaders
+MACSDK       := MacKernelSDK
+LILU         := Lilu/Lilu
 
-# Standard flags for a hand-built C++ kernel extension.
-CXXFLAGS := -arch x86_64 -std=gnu++17 \
-            -fno-builtin -fno-common -mno-red-zone -mkernel -fapple-kext \
-            -fno-exceptions -fno-rtti -fcheck-new -msoft-float \
+CXX          := $(shell xcrun -f clang++)
+CODESIGN     := $(shell xcrun -f codesign)
+
+# Kernel C++ flags. -nostdinc + MacKernelSDK headers replaces the KDK; clang's
+# own builtin headers (stdint.h, ...) are kept. PRODUCT_NAME / MODULE_VERSION
+# are consumed by Lilu's plugin_start.cpp and our kern_start.cpp.
+CXXFLAGS := -target $(TARGET) -std=gnu++17 \
+            -mkernel -fapple-kext -fno-builtin -fno-common \
+            -fno-exceptions -fno-rtti -fno-stack-protector \
             -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
-            -nostdinc -isysroot $(SDK) \
-            -I$(KHDRS) -I$(KPRIV) -Isrc \
+            -DLILU_KEXTPATCH_SUPPORT \
+            -DPRODUCT_NAME=$(PRODUCT) -DMODULE_VERSION=$(MODULE_VER) \
+            -nostdinc -isystem $(MACSDK)/Headers \
+            -I$(LILU) -Isrc \
             -Wall -Wno-unused-parameter -O2
 
-LDFLAGS  := -arch x86_64 -static -nostdlib -r -Xlinker -kext -lkmod -lcc_kext
+# Relocatable kext link. Lilu API symbols stay undefined here and are resolved
+# at load time via the OSBundleLibraries dependency on as.vit9696.Lilu.
+LDFLAGS  := -target $(TARGET) -nostdlib -static -Xlinker -kext -r \
+            -L$(MACSDK)/Library/x86_64 -lkmod
 
-SRCS     := src/AMDV.cpp
-OBJS     := $(SRCS:.cpp=.o)
+# Our sources plus Lilu's plugin bootstrap (kmod entry + IOService glue).
+BUILD := build
+SRCS := src/kern_start.cpp \
+        src/kern_hv_amd.cpp \
+        src/kern_svm.cpp \
+        $(LILU)/Library/plugin_start.cpp
 
-.PHONY: all sign clean check-kdk
+# Flatten object paths into build/ so the submodule tree stays clean.
+OBJS := $(addprefix $(BUILD)/,$(notdir $(SRCS:.cpp=.o)))
 
-all: check-kdk $(BUNDLE)
+.PHONY: all sign clean check-submodules
 
-check-kdk:
-	@if [ -z "$(KDK)" ] || [ ! -d "$(KHDRS)" ]; then \
-	  echo "error: no KDK found. Install a Big Sur Kernel Debug Kit and pass KDK=/path/to/KDK_11.x.kdk"; \
+all: check-submodules $(BUNDLE)
+
+check-submodules:
+	@if [ ! -d "$(MACSDK)/Headers" ] || [ ! -d "$(LILU)/Headers" ]; then \
+	  echo "error: submodules missing. Run: git submodule update --init --recursive"; \
 	  exit 1; \
 	fi
-	@echo "Using KDK: $(KDK)"
 
-%.o: %.cpp
+$(BUILD)/%.o: src/%.cpp
+	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(EXEC): $(OBJS)
+$(BUILD)/plugin_start.o: $(LILU)/Library/plugin_start.cpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(PRODUCT): $(OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $(OBJS)
 
-$(BUNDLE): $(EXEC) Info.plist
+$(BUNDLE): $(PRODUCT) Info.plist
 	@rm -rf $(BUNDLE)
 	@mkdir -p $(BUNDLE)/Contents/MacOS
 	@cp Info.plist $(BUNDLE)/Contents/Info.plist
-	@cp $(EXEC) $(BUNDLE)/Contents/MacOS/$(EXEC)
-	@echo "Built $(BUNDLE)"
+	@cp $(PRODUCT) $(BUNDLE)/Contents/MacOS/$(PRODUCT)
+	@echo "Built $(BUNDLE) (x86_64 Lilu plugin)"
 
 sign: $(BUNDLE)
 	$(CODESIGN) --force --sign - $(BUNDLE)
 	@echo "Ad-hoc signed $(BUNDLE) (dev only)."
 
 clean:
-	rm -rf $(OBJS) $(EXEC) $(BUNDLE)
+	rm -rf $(BUILD) $(PRODUCT) $(BUNDLE)
