@@ -1,0 +1,7 @@
+# Build artifacts
+*.o
+/AMDV
+/AMDV.kext/
+
+# macOS
+.DS_Store
