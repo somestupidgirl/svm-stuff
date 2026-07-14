@@ -139,7 +139,16 @@ void translateVmcsToVmcb(const ShadowVMCS &vmcs, vmcb_t *vmcb)
 	// data path is visible. Left as the largest single TODO in this file.
 	if (sec & SEC_CTL_ENABLE_EPT) {
 		vmcb->np_enable  = 1;
-		vmcb->nested_cr3 = vmcs.read(VMCS_EPT_POINTER) & ~0xFFFull; // TODO: rebuild as NPT
+		uint64_t npt = buildNptFromEpt(vmcs.read(VMCS_EPT_POINTER));
+		if (npt) {
+			vmcb->nested_cr3 = npt;
+		} else {
+			// Not rebuilt yet: pointing N_CR3 at the raw EPT tables will fault
+			// (incompatible PTE format). Kept visible so the gap is obvious.
+			vmcb->nested_cr3 = vmcs.read(VMCS_EPT_POINTER) & ~0xFFFull;
+			SYSLOG("amdv", "EPT->NPT rebuild not implemented; N_CR3 points at raw "
+				   "EPT tables and guest memory WILL fault");
+		}
 	} else {
 		vmcb->np_enable  = 0;
 		vmcb->nested_cr3 = 0;
@@ -150,10 +159,32 @@ void translateVmcsToVmcb(const ShadowVMCS &vmcs, vmcb_t *vmcb)
 		? static_cast<uint32_t>(vmcs.read(VMCS_VIRTUAL_PROCESSOR_ID)) : 0;
 	vmcb->guest_asid = vpid ? vpid : 1;
 
+	// --- Event injection: VMX VM-entry interruption-info -> SVM EVENTINJ ---
+	// The two fields share vector/valid/deliver-error bit positions; only the
+	// TYPE encoding needs remapping.
+	uint32_t entryInfo = static_cast<uint32_t>(vmcs.read(VMCS_VM_ENTRY_INTR_INFO));
+	if (entryInfo & VMX_ENTRY_INTR_VALID) {
+		uint64_t svmType;
+		switch (vmxEntryType(entryInfo)) {
+		case VMX_INTR_TYPE_EXT:     svmType = EVENTINJ_TYPE_INTR;   break;
+		case VMX_INTR_TYPE_NMI:     svmType = EVENTINJ_TYPE_NMI;    break;
+		case VMX_INTR_TYPE_SW_INT:  svmType = EVENTINJ_TYPE_SOFT;   break;
+		case VMX_INTR_TYPE_HW_EXCEP:
+		case VMX_INTR_TYPE_PRIV_SW:
+		case VMX_INTR_TYPE_SW_EXCEP:
+		default:                    svmType = EVENTINJ_TYPE_EXCEPT; break;
+		}
+		bool ev = (entryInfo & VMX_ENTRY_INTR_DELIVER_EC) != 0;
+		uint32_t errCode = static_cast<uint32_t>(vmcs.read(VMCS_VM_ENTRY_EXCEPTION_ERROR));
+		vmcb_set64(vmcb, VMCB_CTL_EVENTINJ,
+		           eventinj_make(vmxEntryVector(entryInfo), svmType, ev, errCode));
+	} else {
+		vmcb_set64(vmcb, VMCB_CTL_EVENTINJ, 0);
+	}
+
 	// TODO: MSR/IO intercepts. SVM MSRPM/IOPM have a different layout from VMX
 	// MSR/IO bitmaps and need translation into separate SVM permission pages;
 	// until then MSR/IO exiting requested via CPU controls is not honoured.
-	(void)0;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,4 +251,69 @@ uint32_t svmExitToVmxReason(uint64_t svmExitCode, uint64_t exitInfo1)
 			return EXIT_EXCEPTION_NMI;
 		return EXIT_UNKNOWN;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// EPT -> NPT
+// ---------------------------------------------------------------------------
+namespace {
+// Intel EPT entry bits (SDM 28.2.2).
+constexpr uint64_t EPT_READ    = 1ull << 0;
+constexpr uint64_t EPT_WRITE   = 1ull << 1;
+constexpr uint64_t EPT_EXECUTE = 1ull << 2;
+constexpr uint64_t EPT_MEMTYPE_SHIFT = 3;         // bits 5:3, leaf only
+constexpr uint64_t EPT_IGNORE_PAT = 1ull << 6;    // leaf only
+constexpr uint64_t EPT_PAGE_SIZE  = 1ull << 7;    // leaf at PDPTE/PDE
+constexpr uint64_t EPT_ADDR_MASK  = 0x000FFFFFFFFFF000ull;
+
+// Standard x86-64 (NPT) entry bits.
+constexpr uint64_t PT_PRESENT = 1ull << 0;
+constexpr uint64_t PT_RW      = 1ull << 1;
+constexpr uint64_t PT_US      = 1ull << 2;
+constexpr uint64_t PT_PWT     = 1ull << 3;
+constexpr uint64_t PT_PCD     = 1ull << 4;
+constexpr uint64_t PT_PS      = 1ull << 7;
+constexpr uint64_t PT_NX      = 1ull << 63;
+} // namespace
+
+uint64_t eptEntryToNpt(uint64_t eptEntry, bool leaf)
+{
+	// EPT has no present bit; a slot is present iff any of R/W/X is set.
+	if ((eptEntry & (EPT_READ | EPT_WRITE | EPT_EXECUTE)) == 0)
+		return 0;
+
+	uint64_t npt = (eptEntry & EPT_ADDR_MASK) | PT_PRESENT | PT_US;
+
+	if (eptEntry & EPT_WRITE)
+		npt |= PT_RW;
+	if (!(eptEntry & EPT_EXECUTE))
+		npt |= PT_NX;
+
+	if (leaf) {
+		if (eptEntry & EPT_PAGE_SIZE)
+			npt |= PT_PS;
+		// EPT memory type (0=UC,1=WC,4=WT,5=WP,6=WB) -> PWT/PCD approximation.
+		// Only UC is mapped precisely; everything else falls back to WB. A
+		// faithful mapping would also route bit 7 through the NPT PAT.
+		uint64_t memType = (eptEntry >> EPT_MEMTYPE_SHIFT) & 0x7;
+		if (memType == 0 /* UC */)
+			npt |= PT_PWT | PT_PCD;
+		(void)EPT_IGNORE_PAT;
+	}
+	return npt;
+}
+
+uint64_t buildNptFromEpt(uint64_t eptp)
+{
+	(void)eptp;
+	// SCAFFOLD. A real implementation walks the four EPT levels from
+	// (eptp & ~0xFFF), allocates a parallel NPT page per table, and fills each
+	// entry with eptEntryToNpt(). It needs:
+	//   * a physically-contiguous page allocator returning host PAs,
+	//   * reads of the guest EPT tables (map each table PA into kernel space),
+	//   * large-page handling at PDPTE/PDE (EPT_PAGE_SIZE),
+	//   * a teardown path to free the NPT on VM destruction.
+	// Until that exists we report "not built" so translateVmcsToVmcb logs the
+	// gap instead of pointing N_CR3 at incompatible EPT tables silently.
+	return 0;
 }

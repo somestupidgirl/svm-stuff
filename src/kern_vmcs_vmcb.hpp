@@ -31,4 +31,17 @@ uint32_t svmExitToVmxReason(uint64_t svmExitCode, uint64_t exitInfo1);
 uint16_t vmxArToSvmAttrib(uint32_t vmxAr);
 uint32_t svmAttribToVmxAr(uint16_t svmAttrib);
 
+// Convert one Intel EPT paging entry into the equivalent AMD NPT entry. NPT
+// uses the standard x86-64 paging bit layout; EPT does not, so this remaps
+// read/write/execute + memory-type into present/rw/us/nx/pcd. `leaf` selects a
+// page-mapping entry (carries page-size/memory-type) vs. a table pointer.
+uint64_t eptEntryToNpt(uint64_t eptEntry, bool leaf);
+
+// Build an NPT hierarchy mirroring the guest's EPT and return the host
+// physical address for VMCB N_CR3, or 0 if not built. SCAFFOLD: the recursive
+// 4-level walk + page allocation is not yet implemented (needs a physical page
+// allocator and reads of the guest EPT tables); eptEntryToNpt() above is the
+// finished, reusable core.
+uint64_t buildNptFromEpt(uint64_t eptp);
+
 #endif /* kern_vmcs_vmcb_hpp */

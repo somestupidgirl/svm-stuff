@@ -199,7 +199,31 @@ static inline void amdv_clgi(void) { __asm__ volatile ("clgi" ::: "memory"); }
 #define VMCB_GPAT      0x668u   /* nested-paging guest PAT              */
 
 /* Control-area fields past nested_cr3 that the shim reads. */
-#define VMCB_CTL_NRIP  0x0C8u   /* next-sequential RIP on #VMEXIT       */
+#define VMCB_CTL_EVENTINJ 0x0A8u /* event injection into the guest      */
+#define VMCB_CTL_NRIP     0x0C8u /* next-sequential RIP on #VMEXIT      */
+
+/*
+ * EVENTINJ (Vol.2 §15.20). Same bit layout the guest observes on delivery:
+ *   VECTOR[7:0]  TYPE[10:8]  EV[11]=error-code-valid  V[31]=valid
+ *   ERRORCODE[63:32]
+ * The VMX VM-entry interruption-information field is nearly identical, which
+ * is what makes the injection direction a small mapping.
+ */
+#define EVENTINJ_TYPE_INTR   0ull   /* external/virtual interrupt         */
+#define EVENTINJ_TYPE_NMI    2ull
+#define EVENTINJ_TYPE_EXCEPT 3ull   /* hardware exception                 */
+#define EVENTINJ_TYPE_SOFT   4ull   /* software interrupt                 */
+#define EVENTINJ_EV          (1ull << 11)
+#define EVENTINJ_VALID       (1ull << 31)
+
+static inline uint64_t eventinj_make(uint8_t vector, uint64_t type,
+                                     bool errValid, uint32_t errCode)
+{
+    uint64_t e = (uint64_t)vector | (type << 8) | EVENTINJ_VALID;
+    if (errValid)
+        e |= EVENTINJ_EV | ((uint64_t)errCode << 32);
+    return e;
+}
 
 typedef struct __attribute__((packed)) {
     uint16_t selector;

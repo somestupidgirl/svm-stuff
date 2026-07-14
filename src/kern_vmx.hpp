@@ -52,6 +52,8 @@ enum VmcsField : uint32_t {
 	VMCS_VM_EXIT_CONTROLS    = 0x400C,
 	VMCS_VM_ENTRY_CONTROLS   = 0x4012,
 	VMCS_VM_ENTRY_INTR_INFO  = 0x4016,
+	VMCS_VM_ENTRY_EXCEPTION_ERROR = 0x4018,
+	VMCS_VM_ENTRY_INSTR_LEN  = 0x401A,
 	VMCS_SECONDARY_EXEC_CTL  = 0x401E,
 
 	// 32-bit read-only exit information
@@ -123,6 +125,23 @@ enum VmxSecondaryExecCtl : uint32_t {
 	SEC_CTL_ENABLE_EPT       = 1u << 1,
 	SEC_CTL_ENABLE_VPID      = 1u << 5,
 	SEC_CTL_UNRESTRICTED     = 1u << 7,
+};
+
+// ---- VMX VM-entry interruption-information field (SDM 24.8.3) --------------
+// Layout matches SVM EVENTINJ except for the TYPE encoding; bit 31 = valid,
+// bit 11 = deliver-error-code.
+#define VMX_ENTRY_INTR_VALID   (1u << 31)
+#define VMX_ENTRY_INTR_DELIVER_EC (1u << 11)
+static inline uint8_t  vmxEntryVector(uint32_t f) { return static_cast<uint8_t>(f & 0xFF); }
+static inline uint32_t vmxEntryType(uint32_t f)   { return (f >> 8) & 0x7; }
+
+enum VmxEntryIntrType : uint32_t {
+	VMX_INTR_TYPE_EXT      = 0,
+	VMX_INTR_TYPE_NMI      = 2,
+	VMX_INTR_TYPE_HW_EXCEP = 3,
+	VMX_INTR_TYPE_SW_INT   = 4,
+	VMX_INTR_TYPE_PRIV_SW  = 5,
+	VMX_INTR_TYPE_SW_EXCEP = 6,
 };
 
 // ---- VMX basic exit reasons (SDM Vol.3C Appendix C) -----------------------
