@@ -7,9 +7,12 @@
 # plugin's log. It never enables guest launch (that is a compile-time flag),
 # so no VMRUN is executed.
 #
+# The CPUID probe is delegated to tests/svmcheck (built by `make tests`), so
+# the C lives in exactly one place: tests/svmcheck.c.
+#
 # Usage:
-#   ./scripts/amdv-hwtest.sh                       # read-only probes only
-#   sudo ./scripts/amdv-hwtest.sh --load \
+#   ./tests/amdv-hwtest.sh                         # read-only probes only
+#   sudo ./tests/amdv-hwtest.sh --load \
 #        --lilu /path/to/Lilu.kext [--amdv ./build/AMDV.kext]
 #
 # Feed the "SVM feature flags" line and the "VMX gate" result back to guide
@@ -17,7 +20,9 @@
 
 set -uo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$TESTS_DIR/.." && pwd)"
+SVMCHECK="$TESTS_DIR/svmcheck"
 AMDV_KEXT="$REPO_DIR/build/AMDV.kext"
 LILU_KEXT=""
 DO_LOAD=0
@@ -45,41 +50,19 @@ note "machdep.cpu.vendor: $(sysctl -n machdep.cpu.vendor 2>/dev/null)"
 
 # --------------------------------------------------------------------------
 hr "SVM capability (CPUID 0x8000000A)"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-cat > "$TMP/svm.c" <<'EOF'
-#include <cpuid.h>
-#include <stdio.h>
-#include <string.h>
-int main(void) {
-    unsigned a, b, c, d;
-    char vendor[13] = {0};
-    __get_cpuid(0, &a, &b, &c, &d);
-    memcpy(vendor + 0, &b, 4); memcpy(vendor + 4, &d, 4); memcpy(vendor + 8, &c, 4);
-    printf("  vendor            : %s\n", vendor);
-    if (strcmp(vendor, "AuthenticAMD") != 0) { printf("  (not AMD; SVM checks N/A)\n"); return 0; }
-
-    __get_cpuid(0x80000001, &a, &b, &c, &d);
-    printf("  SVM supported     : %s (0x80000001 ECX.2)\n", (c & (1u<<2)) ? "yes" : "NO");
-    if (!(c & (1u<<2))) return 0;
-
-    __get_cpuid(0x8000000A, &a, &b, &c, &d);
-    printf("  SVM revision      : %u\n", a & 0xff);
-    printf("  usable ASIDs      : %u\n", b);
-    printf("  feature edx       : 0x%08x\n", d);
-    printf("    NP (nested pg)  : %d  <- needed for guest memory\n", !!(d & (1u<<0)));
-    printf("    NRIPS           : %d  <- if 0, need instruction-decode RIP fallback\n", !!(d & (1u<<3)));
-    printf("    SVML (svm lock) : %d\n", !!(d & (1u<<2)));
-    printf("    VMCB clean bits : %d\n", !!(d & (1u<<5)));
-    printf("    Flush-by-ASID   : %d\n", !!(d & (1u<<6)));
-    printf("    Decode assists  : %d\n", !!(d & (1u<<7)));
-    return 0;
-}
-EOF
-if cc "$TMP/svm.c" -o "$TMP/svm" 2>"$TMP/cc.err"; then
-  "$TMP/svm"
+# Delegates to tests/svmcheck rather than carrying its own copy of the probe.
+# svmcheck is built for x86_64, so it only executes on the AMD target (or an
+# Apple Silicon host with Rosetta 2).
+if [ ! -x "$SVMCHECK" ]; then
+  note "svmcheck not built; building via make -C $TESTS_DIR"
+  make -C "$TESTS_DIR" >/dev/null 2>&1 || note "build failed (try: make tests)"
+fi
+if [ -x "$SVMCHECK" ]; then
+  "$SVMCHECK" 2>&1 | sed 's/^/  /'
+  rc=${PIPESTATUS[0]}
+  [ "$rc" -ne 0 ] && note "(svmcheck exited $rc)"
 else
-  note "compile failed:"; sed 's/^/    /' "$TMP/cc.err"
+  note "svmcheck unavailable; build it with: make tests"
 fi
 
 # --------------------------------------------------------------------------
