@@ -4,5 +4,8 @@
 /AMDV.kext/
 *.o
 
+# Test binaries
+/tests/svmcheck
+
 # macOS
 .DS_Store

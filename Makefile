@@ -5,15 +5,22 @@
 # whole point of vendoring MacKernelSDK. No KDK, no Intel Mac required.
 #
 #   git submodule update --init --recursive
-#   make            # -> AMDV.kext
+#   make            # -> build/AMDV.kext
 #   make sign       # ad-hoc codesign (dev only)
-#   make clean
+#   make tests      # build the userspace probes in tests/
+#   make clean      # remove build/ (does not touch tests/)
+#
+# Everything this Makefile produces lands in build/; nothing is written to the
+# project root.
 #
 # Requirements: Command Line Tools (clang/ld/codesign) and the two submodules
 # (Lilu, MacKernelSDK) checked out under this directory.
 
 PRODUCT      := AMDV
-BUNDLE       := $(PRODUCT).kext
+BUILD        := build
+BUNDLE       := $(BUILD)/$(PRODUCT).kext
+EXEC         := $(BUILD)/$(PRODUCT)
+PLIST        := src/Info.plist
 BUNDLE_ID    := org.hackintosh.AMDV
 MODULE_VER   := 0.1.0
 
@@ -45,7 +52,6 @@ LDFLAGS  := -target $(TARGET) -nostdlib -static -Xlinker -kext -r \
             -L$(MACSDK)/Library/x86_64 -lkmod
 
 # Our sources plus Lilu's plugin bootstrap (kmod entry + IOService glue).
-BUILD := build
 SRCS := src/kern_start.cpp \
         src/kern_hv_amd.cpp \
         src/kern_svm.cpp \
@@ -59,9 +65,15 @@ ASRCS := src/svm_switch.S
 OBJS := $(addprefix $(BUILD)/,$(notdir $(SRCS:.cpp=.o))) \
         $(addprefix $(BUILD)/,$(notdir $(ASRCS:.S=.o)))
 
-.PHONY: all sign clean check-submodules
+# `tests` MUST be phony: a tests/ directory exists, so without this make would
+# consider the target already satisfied and do nothing.
+.PHONY: all sign clean check-submodules tests
 
 all: check-submodules $(BUNDLE)
+
+# Delegate to tests/Makefile (builds the userspace x86_64 probes).
+tests:
+	@$(MAKE) -C tests
 
 check-submodules:
 	@if [ ! -d "$(MACSDK)/Headers" ] || [ ! -d "$(LILU)/Headers" ]; then \
@@ -81,19 +93,21 @@ $(BUILD)/%.o: src/%.S
 	@mkdir -p $(BUILD)
 	$(CXX) -target $(TARGET) -c $< -o $@
 
-$(PRODUCT): $(OBJS)
+$(EXEC): $(OBJS)
 	$(CXX) $(LDFLAGS) -o $@ $(OBJS)
 
-$(BUNDLE): $(PRODUCT) Info.plist
+$(BUNDLE): $(EXEC) $(PLIST)
 	@rm -rf $(BUNDLE)
 	@mkdir -p $(BUNDLE)/Contents/MacOS
-	@cp Info.plist $(BUNDLE)/Contents/Info.plist
-	@cp $(PRODUCT) $(BUNDLE)/Contents/MacOS/$(PRODUCT)
+	@cp $(PLIST) $(BUNDLE)/Contents/Info.plist
+	@cp $(EXEC) $(BUNDLE)/Contents/MacOS/$(PRODUCT)
 	@echo "Built $(BUNDLE) (x86_64 Lilu plugin)"
 
 sign: $(BUNDLE)
 	$(CODESIGN) --force --sign - $(BUNDLE)
 	@echo "Ad-hoc signed $(BUNDLE) (dev only)."
 
+# Everything we produce is under build/, so removing it is sufficient.
+# tests/ has its own clean (make -C tests clean).
 clean:
-	rm -rf $(BUILD) $(PRODUCT) $(BUNDLE)
+	rm -rf $(BUILD)

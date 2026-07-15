@@ -10,7 +10,7 @@
 # Usage:
 #   ./scripts/amdv-hwtest.sh                       # read-only probes only
 #   sudo ./scripts/amdv-hwtest.sh --load \
-#        --lilu /path/to/Lilu.kext [--amdv ./AMDV.kext]
+#        --lilu /path/to/Lilu.kext [--amdv ./build/AMDV.kext]
 #
 # Feed the "SVM feature flags" line and the "VMX gate" result back to guide
 # what to build next.
@@ -18,7 +18,7 @@
 set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AMDV_KEXT="$REPO_DIR/AMDV.kext"
+AMDV_KEXT="$REPO_DIR/build/AMDV.kext"
 LILU_KEXT=""
 DO_LOAD=0
 KERNEL="/System/Library/Kernels/kernel"

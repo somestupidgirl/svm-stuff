@@ -55,7 +55,7 @@ The SVM hardware bring-up (`kern_svm.*`) still works independently of all this.
 ## Layout
 
 ```
-Info.plist            Lilu-plugin bundle (depends on as.vit9696.Lilu)
+src/Info.plist        Lilu-plugin bundle (depends on as.vit9696.Lilu)
 Makefile              Cross-compiles x86_64 via MacKernelSDK (no KDK/Intel Mac)
 src/SVM.h             SVM MSRs, CPUID leaves, VMCB layout + state-save accessors
 src/kern_svm.*        SvmBackend: detect + enable SVM, allocate VMCB
