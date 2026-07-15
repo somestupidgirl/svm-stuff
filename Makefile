@@ -42,13 +42,17 @@ CXXFLAGS := -target $(TARGET) -std=gnu++17 \
             -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
             -DLILU_KEXTPATCH_SUPPORT \
             -DPRODUCT_NAME=$(PRODUCT) -DMODULE_VERSION=$(MODULE_VER) \
+            -DBUNDLE_ID=$(BUNDLE_ID) \
             -nostdinc -isystem $(MACSDK)/Headers \
             -I$(LILU) -Isrc \
             -Wall -Wno-unused-parameter -O2
 
-# Relocatable kext link. Lilu API symbols stay undefined here and are resolved
-# at load time via the OSBundleLibraries dependency on as.vit9696.Lilu.
-LDFLAGS  := -target $(TARGET) -nostdlib -static -Xlinker -kext -r \
+# Kext link. -Xlinker -kext produces MH_KEXT_BUNDLE (filetype 11), which is
+# what kmutil requires for x86_64. Do NOT add -r: that yields MH_OBJECT
+# (filetype 1), which loads nowhere and is only correct for legacy i386 kexts.
+# Lilu API symbols stay undefined here and are resolved at load time via the
+# OSBundleLibraries dependency on as.vit9696.Lilu.
+LDFLAGS  := -target $(TARGET) -nostdlib -Xlinker -kext \
             -L$(MACSDK)/Library/x86_64 -lkmod
 
 # Our sources plus Lilu's plugin bootstrap (kmod entry + IOService glue).
@@ -59,10 +63,16 @@ SRCS := src/kern_start.cpp \
         src/kern_vmx_emu.cpp \
         $(LILU)/Library/plugin_start.cpp
 
+# kmod_info.c defines _kmod_info/_realmain/_antimain, which libkmod's
+# _start/_stop stubs reference. Xcode generates this; a hand-built kext must
+# supply it or the kernel has no entry point.
+CSRCS := src/kmod_info.c
+
 ASRCS := src/svm_switch.S
 
 # Flatten object paths into build/ so the submodule tree stays clean.
 OBJS := $(addprefix $(BUILD)/,$(notdir $(SRCS:.cpp=.o))) \
+        $(addprefix $(BUILD)/,$(notdir $(CSRCS:.c=.o))) \
         $(addprefix $(BUILD)/,$(notdir $(ASRCS:.S=.o)))
 
 # `tests` MUST be phony: a tests/ directory exists, so without this make would
@@ -89,6 +99,10 @@ $(BUILD)/plugin_start.o: $(LILU)/Library/plugin_start.cpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD)/%.o: src/%.c
+	@mkdir -p $(BUILD)
+	$(CXX) -x c $(filter-out -std=gnu++17 -fno-rtti -fcheck-new -fapple-kext,$(CXXFLAGS)) -c $< -o $@
+
 $(BUILD)/%.o: src/%.S
 	@mkdir -p $(BUILD)
 	$(CXX) -target $(TARGET) -c $< -o $@
@@ -101,7 +115,21 @@ $(BUNDLE): $(EXEC) $(PLIST)
 	@mkdir -p $(BUNDLE)/Contents/MacOS
 	@cp $(PLIST) $(BUNDLE)/Contents/Info.plist
 	@cp $(EXEC) $(BUNDLE)/Contents/MacOS/$(PRODUCT)
-	@echo "Built $(BUNDLE) (x86_64 Lilu plugin)"
+	@# Both of these have silently produced an unloadable kext before, and the
+	@# failure only shows up on real hardware via kmutil. Check them here.
+	@ft=`otool -h $(BUNDLE)/Contents/MacOS/$(PRODUCT) | awk 'NR==4{print $$5}'`; \
+	if [ "$$ft" != "11" ]; then \
+	  echo "error: Mach-O filetype $$ft, expected 11 (MH_KEXT_BUNDLE)."; \
+	  echo "       filetype 1 (MH_OBJECT) means -r crept back into LDFLAGS."; \
+	  exit 1; \
+	fi
+	@kid=`strings $(BUNDLE)/Contents/MacOS/$(PRODUCT) | grep -x '$(BUNDLE_ID)' | head -1`; \
+	if [ "$$kid" != "$(BUNDLE_ID)" ]; then \
+	  echo "error: kmod_info.name is not '$(BUNDLE_ID)' (CFBundleIdentifier)."; \
+	  echo "       the kernel matches these; a mismatch is rejected at load."; \
+	  exit 1; \
+	fi
+	@echo "Built $(BUNDLE) (x86_64 MH_KEXT_BUNDLE, id $(BUNDLE_ID))"
 
 sign: $(BUNDLE)
 	$(CODESIGN) --force --sign - $(BUNDLE)
