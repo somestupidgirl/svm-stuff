@@ -39,6 +39,10 @@ private:
 	// routed, kept for symmetry / potential fallback).
 	static bool wrapVmxIsAvailable(void);
 
+	// Write the boot-latched hv_support_available. Returns true if the value
+	// stuck. Gated behind -amdvgate: see the DANGER note in the .cpp.
+	static bool setHvSupportAvailable(KernelPatcher &patcher, int value);
+
 	SvmBackend   fSvm;
 	VmxEmulator  fVmx;
 

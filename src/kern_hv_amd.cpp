@@ -6,35 +6,85 @@
 
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
+#include <Headers/kern_mach.hpp>
 
 HypervisorAMD hvAmd;
 
 HypervisorAMD    *HypervisorAMD::callbackInst    = nullptr;
 mach_vm_address_t HypervisorAMD::orgVmxIsAvailable = 0;
 
-// Candidate XNU symbols that gate hypervisor availability on x86_64. These
-// names come from open-source XNU (osfmk/i386/vmx/vmx_cpu.c, osfmk/kern/
-// hv_support.c) but MUST be verified against the exact Big Sur build you run
-// - they are unexported/internal and can differ or be inlined. solveSymbol
-// returns 0 when a name is absent, so a miss logs and degrades rather than
-// panicking.
+// Candidate XNU symbols that gate hypervisor availability on x86_64, most
+// likely first. Verified on Big Sur 11.6.6 (20G624): _vmx_hv_support EXISTS,
+// _vmx_is_available does NOT. The latter is kept as a fallback for other
+// kernel versions. These are unexported internals and may differ or be
+// inlined; solveSymbol returns 0 on a miss so we log and degrade rather than
+// panic.
 static const char *kVmxAvailSymbols[] = {
+	"_vmx_hv_support",     // int vmx_hv_support(void)      - present on 11.6.6
 	"_vmx_is_available",   // boolean_t vmx_is_available(void)
-	"_vmx_hv_support",     // int vmx_hv_support(void)
 };
+
+// The latched result of the boot-time check (int hv_support_available in
+// osfmk/kern/hv_support.c). See setHvSupportAvailable() for why this, not the
+// function route, is what actually moves kern.hv_support.
+static const char *kHvSupportAvailSymbol = "_hv_support_available";
 
 // ---------------------------------------------------------------------------
 // The VMX capability gate.
 //
-// Forcing this true makes kern.hv_support report 1 and lets Hypervisor.
-// framework proceed past its "is virtualization available" check. This alone
-// does NOT make virtualization work on AMD - the subsequent vmlaunch will
-// #UD. It is the first, easy half of the hook, provided so the wiring is
-// demonstrable end to end.
+// NOTE: routing this is very probably USELESS on its own. XNU latches the
+// answer at boot:
+//
+//     int hv_support_available = 0;
+//     void hv_support_init(void) { hv_support_available = vmx_hv_support(); }
+//     int  hv_get_support(void)  { return hv_support_available; }
+//
+// hv_support_init() runs in kernel_bootstrap, long before any kext (even a
+// boot-injected one) starts, so by the time this route is installed the 0 is
+// already stored and vmx_hv_support() is never called again. The route is kept
+// because it is harmless and correct-in-principle for any later caller, but
+// setHvSupportAvailable() below is what actually changes kern.hv_support.
 // ---------------------------------------------------------------------------
 bool HypervisorAMD::wrapVmxIsAvailable(void)
 {
 	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Write the latched hv_support_available directly.
+//
+// This is a raw kernel data write, so it goes through Lilu's write-protection
+// helper under the kernel write lock.
+//
+// DANGER: flipping this to 1 makes sysctl kern.hv_support report 1, which
+// tells userspace that Hypervisor.framework is usable. It is NOT usable yet -
+// any app that acts on it (Docker, VirtualBox, qemu -accel hvf, ...) will
+// drive Apple's VMX path and #UD on AMD, and with no #UD handler installed
+// that is a panic. This is a diagnostic for confirming the latch model, not a
+// feature. Gated behind the -amdvgate boot argument.
+// ---------------------------------------------------------------------------
+bool HypervisorAMD::setHvSupportAvailable(KernelPatcher &patcher, int value)
+{
+	mach_vm_address_t addr = patcher.solveSymbol(KernelPatcher::KernelID, kHvSupportAvailSymbol);
+	patcher.clearError();
+	if (!addr) {
+		SYSLOG("amdv", "%s not found; cannot set the hv_support latch", kHvSupportAvailSymbol);
+		return false;
+	}
+
+	int before = *reinterpret_cast<volatile int *>(addr);
+
+	if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS) {
+		SYSLOG("amdv", "failed to disable kernel write protection");
+		return false;
+	}
+	*reinterpret_cast<volatile int *>(addr) = value;
+	MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+
+	int after = *reinterpret_cast<volatile int *>(addr);
+	SYSLOG("amdv", "%s @ 0x%llx: %d -> %d (wrote %d)",
+		   kHvSupportAvailSymbol, addr, before, after, value);
+	return after == value;
 }
 
 void HypervisorAMD::onPatcherLoad(KernelPatcher &patcher)
@@ -68,11 +118,35 @@ void HypervisorAMD::onPatcherLoad(KernelPatcher &patcher)
 	}
 
 	if (!routed) {
-		SYSLOG("amdv", "could not locate a VMX gate symbol; kern.hv_support unchanged. "
-			   "Symbol names must be updated for this kernel build.");
+		SYSLOG("amdv", "could not locate a VMX gate symbol; symbol names must be "
+			   "updated for this kernel build.");
 	}
 
-	// 3. Bind the VMX->SVM emulator to the prepared VMCB. The instruction
+	// 3. Report the latch, and optionally flip it.
+	//
+	// Routing the gate above cannot move kern.hv_support by itself, because
+	// hv_support_init() already ran during kernel_bootstrap and stored the
+	// answer. Read it back so the log states plainly whether the route had any
+	// effect, then only write it when explicitly asked: reporting
+	// kern.hv_support=1 while the #UD handler is still missing is a panic
+	// waiting for the first app that believes it.
+	if (checkKernelArgument("-amdvgate")) {
+		SYSLOG("amdv", "-amdvgate: forcing the hv_support latch. Nothing can USE "
+			   "Hypervisor.framework yet - expect a panic if anything tries.");
+		setHvSupportAvailable(patcher, 1);
+	} else {
+		mach_vm_address_t addr = patcher.solveSymbol(KernelPatcher::KernelID, kHvSupportAvailSymbol);
+		patcher.clearError();
+		if (addr)
+			SYSLOG("amdv", "%s = %d (boot-latched). Routing the gate does not change "
+				   "it; boot with -amdvgate to force it.",
+				   kHvSupportAvailSymbol, *reinterpret_cast<volatile int *>(addr));
+		else
+			SYSLOG("amdv", "%s not found; cannot report the hv_support latch",
+				   kHvSupportAvailSymbol);
+	}
+
+	// 4. Bind the VMX->SVM emulator to the prepared VMCB. The instruction
 	//    semantics (kern_vmx_emu.*) and the VMCS<->VMCB translation
 	//    (kern_vmcs_vmcb.*) are implemented; what remains before guests run is
 	//    (a) trapping #UD and routing it into fVmx.handleUD(), and
